@@ -6,11 +6,14 @@ from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.regularizers import l1
 import yfinance as yf
 import matplotlib.pyplot as plt
+from kerastuner.tuners import RandomSearch
+
 
 def load_data(symbol):
     data = yf.download(symbol, start='2000-01-01')
     close_data = data['Close'].values.reshape(-1, 1)
     return data[['Open', 'High', 'Low', 'Close', 'Volume']], close_data
+
 
 def preprocess_data(data, close_data):
     scaler = MinMaxScaler(feature_range=(0, 1))
@@ -31,16 +34,23 @@ def create_dataset(dataset, look_back=60):
         Y.append(dataset[i + look_back, 3])  # 'Close' price is the target
     return np.array(X), np.array(Y)
 
-def create_model(input_shape):
+
+def build_model(hp, X_train):
     model = Sequential()
-    model.add(LSTM(units=50, return_sequences=True, input_shape=input_shape, kernel_regularizer=l1(0.01)))
-    model.add(Dropout(0.2))
-    model.add(LSTM(units=50, return_sequences=False, kernel_regularizer=l1(0.01)))
-    model.add(Dropout(0.2))
+    model.add(LSTM(units=hp.Int('units', min_value=32, max_value=512, step=32),
+                   return_sequences=True,
+                   input_shape=(X_train.shape[1], X_train.shape[2]),
+                   kernel_regularizer=l1(hp.Choice('reg_strength', values=[0.0, 0.01, 0.1]))))
+    model.add(Dropout(hp.Float('dropout', min_value=0.0, max_value=0.5, step=0.1)))
+    model.add(LSTM(units=hp.Int('units', min_value=32, max_value=512, step=32),
+                   return_sequences=False,
+                   kernel_regularizer=l1(hp.Choice('reg_strength', values=[0.0, 0.01, 0.1]))))
+    model.add(Dropout(hp.Float('dropout', min_value=0.0, max_value=0.5, step=0.1)))
     model.add(Dense(units=25))
     model.add(Dense(units=1))
     model.compile(optimizer='adam', loss='mean_squared_error')
     return model
+
 
 def main():
     data, close_data = load_data('AAPL')
@@ -49,12 +59,26 @@ def main():
     X_test, Y_test = create_dataset(test)
     X_train = np.reshape(X_train, (X_train.shape[0], X_train.shape[1], X_train.shape[2]))
     X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1], X_test.shape[2]))
-    model = create_model((X_train.shape[1], X_train.shape[2]))
-    model.fit(X_train, Y_train, epochs=20, batch_size=32, validation_data=(X_test, Y_test))
+
+    tuner = RandomSearch(
+        lambda hp: build_model(hp, X_train),
+        objective='val_loss',
+        max_trials=5,  # how many model variations to test
+        executions_per_trial=3,  # how many trials per variation
+        directory='my_dir',  # where to save the models
+        project_name='helloworld')  # name of the project
+
+    tuner.search_space_summary()
+
+    tuner.search(X_train, Y_train,
+                 epochs=20,
+                 validation_data=(X_test, Y_test))
+
+    best_model = tuner.get_best_models(num_models=1)[0]
 
     # Make predictions
-    train_predict = model.predict(X_train)
-    test_predict = model.predict(X_test)
+    train_predict = best_model.predict(X_train)
+    test_predict = best_model.predict(X_test)
 
     # Invert predictions back to original scale
     train_predict = close_scaler.inverse_transform(train_predict)
@@ -69,6 +93,6 @@ def main():
     plt.legend()
     plt.show()
 
+
 if __name__ == "__main__":
     main()
-
